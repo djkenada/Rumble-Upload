@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+venv/
+.venv/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Downloads and data
+downloads/
+queue_data.json
+*.mp4
+*.webm
+*.m4a
+cookies.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Release zip
+*.zip
+
+# Test/inspect scripts
+inspect_*.py
+test_*.py
