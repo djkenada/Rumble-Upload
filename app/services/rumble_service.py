@@ -1,9 +1,11 @@
 import os
+import re
 import shutil
 import subprocess
 import time
 
 from selenium import webdriver
+from selenium.common.exceptions import ElementClickInterceptedException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -77,6 +79,88 @@ def _set_value_js(driver, element, text):
     """, element, text)
 
 
+# Rumble's upload page puts the server-side file name into the hidden #video[]
+# input once the file has fully transferred (or "ERROR" if it failed), and shows
+# the running percentage in .num_percent. Its own submit code checks the same input.
+_UPLOAD_STATE_JS = """
+    var v = document.getElementById('video[]');
+    var pct = document.querySelector('.num_percent');
+    var err = document.getElementById('error_video');
+    return {
+        found: !!v,
+        value: v ? (v.value || '') : '',
+        percent: pct ? (pct.textContent || '').trim() : '',
+        error: (err && err.offsetParent !== null) ? (err.textContent || '').trim() : ''
+    };
+"""
+
+UPLOAD_STALL_TIMEOUT = 15 * 60      # give up if the percentage hasn't moved for this long
+UPLOAD_MAX_TIME = 12 * 60 * 60      # absolute cap for one file
+
+
+def _wait_for_file_upload(driver, progress_callback=None, poll_interval=2):
+    """Block until Rumble reports the video file has finished uploading.
+
+    Raises if Rumble reports an upload error or the upload stops making progress.
+    """
+    start = time.time()
+    last_change = start
+    last_percent = None
+
+    while True:
+        state = driver.execute_script(_UPLOAD_STATE_JS) or {}
+        value = state.get("value", "")
+        percent_text = state.get("percent", "")
+        match = re.match(r"(\d+)\s*%", percent_text)
+        percent = int(match.group(1)) if match else None
+
+        if value == "ERROR" or state.get("error"):
+            raise RuntimeError(f"Rumble reported a file upload error: {state.get('error') or 'upload failed'}")
+        if value:
+            print(f"[Rumble] File upload finished after {int(time.time() - start)}s")
+            return
+        # Fallback in case Rumble renames the hidden input: trust a steady 100%
+        if not state.get("found") and percent == 100:
+            print("[Rumble] File upload at 100% (completion input not found)")
+            return
+
+        now = time.time()
+        if percent != last_percent:
+            last_percent = percent
+            last_change = now
+        if now - last_change > UPLOAD_STALL_TIMEOUT:
+            raise TimeoutError(f"File upload stalled at {percent_text or 'an unknown point'} "
+                               f"for {UPLOAD_STALL_TIMEOUT // 60} minutes.")
+        if now - start > UPLOAD_MAX_TIME:
+            raise TimeoutError("File upload did not finish in time.")
+
+        if progress_callback:
+            shown = percent if percent is not None else 0
+            # Rumble's own text looks like "43%  (120 MB/s - 2m10s)"
+            detail = " ".join(percent_text.split()) or "starting..."
+            progress_callback(0.1 + 0.7 * shown / 100, f"Uploading file: {detail}"[:40])
+        time.sleep(poll_interval)
+
+
+def _click(driver, element, label="element"):
+    """Click an element even when Rumble's floating help widget sits on top of it."""
+    # The Groove support button is fixed to the bottom-right corner and covers
+    # whatever scrolls underneath it, so take it out of the way first.
+    try:
+        driver.execute_script(
+            "document.querySelectorAll('[id^=\"groove-container\"]').forEach("
+            "function (el) { el.style.display = 'none'; });")
+    except Exception:
+        pass
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+    time.sleep(1)
+    try:
+        element.click()
+    except ElementClickInterceptedException as e:
+        print(f"[Rumble] {label}: normal click blocked, clicking via JS ({str(e).splitlines()[0][:120]})")
+        driver.execute_script("arguments[0].click();", element)
+
+
 def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_callback=None) -> bool:
     """Upload a video to Rumble using Selenium automation.
 
@@ -103,13 +187,13 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
     time.sleep(ACTION_DELAY)
 
     if progress_callback:
-        progress_callback(0.05, "Sending video file...")
+        progress_callback(0.01, "Sending video file...")
 
     file_input.send_keys(metadata.local_file_path)
     print(f"[Rumble] File sent to upload input")
 
     if progress_callback:
-        progress_callback(0.1, "Waiting for file to upload to Rumble...")
+        progress_callback(0.02, "Waiting for the upload form...")
 
     # Wait for the title field to become visible (means file upload is processing)
     title_field = None
@@ -125,8 +209,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
         time.sleep(5)
         elapsed = time.time() - start_time
         if progress_callback:
-            est = min(0.1 + (elapsed / 600) * 0.4, 0.5)
-            progress_callback(est, f"Uploading to Rumble... ({int(elapsed)}s)")
+            progress_callback(0.02, f"Waiting for the upload form... ({int(elapsed)}s)")
 
     if not title_field:
         raise TimeoutError("Title field did not appear. Upload may have failed.")
@@ -136,7 +219,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 2: Fill title ----
     if progress_callback:
-        progress_callback(0.55, "Filling title...")
+        progress_callback(0.03, "Filling title...")
 
     title_field.click()
     time.sleep(0.5)
@@ -148,7 +231,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 3: Fill description ----
     if progress_callback:
-        progress_callback(0.6, "Filling description...")
+        progress_callback(0.04, "Filling description...")
 
     desc_text = metadata.description[:5000] if metadata.description else ""
     if desc_text:
@@ -176,7 +259,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 4: Upload thumbnail ----
     if progress_callback:
-        progress_callback(0.65, "Uploading thumbnail...")
+        progress_callback(0.05, "Uploading thumbnail...")
 
     if metadata.thumbnail_local_path and os.path.exists(metadata.thumbnail_local_path):
         try:
@@ -226,7 +309,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 5: Fill tags ----
     if progress_callback:
-        progress_callback(0.7, "Filling tags...")
+        progress_callback(0.06, "Filling tags...")
 
     tags_str = ", ".join(metadata.tags[:10]) if metadata.tags else ""
     if tags_str:
@@ -245,7 +328,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 6: Select category (News) ----
     if progress_callback:
-        progress_callback(0.77, "Setting category...")
+        progress_callback(0.07, "Setting category...")
 
     time.sleep(ACTION_DELAY)
     try:
@@ -277,7 +360,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
 
     # ---- STEP 7: Set visibility / schedule ----
     if progress_callback:
-        progress_callback(0.75, "Setting visibility/schedule...")
+        progress_callback(0.08, "Setting visibility/schedule...")
 
     time.sleep(ACTION_DELAY)
 
@@ -345,21 +428,24 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
         except Exception as e:
             print(f"[Rumble] Visibility error: {e}")
 
-    # ---- STEP 8: Click "Upload" button (first form submit) ----
+    # ---- STEP 8: Wait for the video file itself to finish uploading ----
+    # The form above is filled in while the file transfers; the Upload button
+    # must not be pressed until Rumble has the whole file.
+    _wait_for_file_upload(driver, progress_callback)
+
+    # ---- STEP 9: Click "Upload" button (first form submit) ----
     if progress_callback:
         progress_callback(0.8, "Submitting form 1...")
 
     time.sleep(ACTION_DELAY)
     try:
         submit1 = driver.find_element(By.ID, "submitForm")
-        driver.execute_script("arguments[0].scrollIntoView(true);", submit1)
-        time.sleep(1)
-        submit1.click()
+        _click(driver, submit1, "Upload button")
         print(f"[Rumble] Form 1 submitted (Upload button clicked)")
     except Exception as e:
-        raise RuntimeError(f"Could not click Upload button: {e}")
+        raise RuntimeError(f"Could not click Upload button: {str(e).splitlines()[0]}")
 
-    # ---- STEP 9: Wait for form 2 (copyright/terms) ----
+    # ---- STEP 10: Wait for form 2 (copyright/terms) ----
     if progress_callback:
         progress_callback(0.85, "Waiting for terms page...")
 
@@ -399,7 +485,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
     if progress_callback:
         progress_callback(0.9, "Final submit...")
 
-    # ---- STEP 10: Click final "Submit" button (form 2) ----
+    # ---- STEP 11: Click final "Submit" button (form 2) ----
     time.sleep(ACTION_DELAY)
     try:
         submit2 = driver.find_element(By.ID, "submitForm2")
@@ -407,9 +493,7 @@ def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_cal
         WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.ID, "submitForm2"))
         )
-        driver.execute_script("arguments[0].scrollIntoView(true);", submit2)
-        time.sleep(1)
-        submit2.click()
+        _click(driver, submit2, "Submit button")
         print(f"[Rumble] Form 2 submitted (final Submit clicked)")
     except Exception as e:
         print(f"[Rumble] Form 2 submit error: {e}")
