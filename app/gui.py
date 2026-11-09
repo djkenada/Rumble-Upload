@@ -226,6 +226,7 @@ class App(ctk.CTk):
             m.title = updates["title"]
             m.description = updates["description"]
             m.tags = updates["tags"]
+            m.category = updates.get("category", m.category)
             self.video_queue.update_video(m)
             self._log(f"Saved: {m.title}")
 
@@ -268,7 +269,7 @@ class App(ctk.CTk):
         self._log("Launching Chrome...")
         try:
             self._chrome_proc = rumble_service.launch_chrome()
-            self._log("Chrome launched. Log into Rumble there, then come back and upload.")
+            self._log("Chrome launched on Rumble Studio. Log in there, then come back and upload.")
             self.login_status.configure(text="Chrome launched", text_color="yellow")
         except Exception as e:
             self._log(f"Chrome error: {e}")
@@ -338,7 +339,7 @@ class App(ctk.CTk):
             if not self._connect_to_chrome():
                 raise RuntimeError("Could not connect to Chrome. Click 'Open Browser' first.")
             if not rumble_service.check_login_status(self._driver):
-                raise RuntimeError("Not logged into Rumble. Log in in the Chrome window, then click 'Upload All' again.")
+                raise RuntimeError("Not logged into Rumble Studio. Log in in the Chrome window, then click 'Upload All' again.")
 
             def ul_progress(pct, status):
                 self._callbacks.schedule(

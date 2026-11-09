@@ -5,6 +5,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from app.models.video_metadata import VideoMetadata
+from app.utils.config import DEFAULT_CATEGORY, RUMBLE_CATEGORIES
 
 
 THUMBNAIL_FILE_TYPES = [
@@ -23,6 +24,8 @@ class MetadataEditor(ctk.CTkFrame):
         self._on_thumbnail = on_thumbnail  # called with (video_path, image_path), or (video_path, None) to remove
         self._current_path = None
         self._thumb_image = None
+        blank = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        self._blank_image = ctk.CTkImage(light_image=blank, dark_image=blank, size=THUMB_SIZE)
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=1)
@@ -48,6 +51,14 @@ class MetadataEditor(ctk.CTkFrame):
         ctk.CTkLabel(self, text="Tags (comma-separated):").grid(row=5, column=0, sticky="w", padx=10, pady=(5, 0), columnspan=3)
         self.tags_entry = ctk.CTkEntry(self, placeholder_text="tag1, tag2, tag3")
         self.tags_entry.grid(row=6, column=0, sticky="ew", padx=10, pady=(2, 5), columnspan=3)
+
+        # Category
+        cat_row = ctk.CTkFrame(self, fg_color="transparent")
+        cat_row.grid(row=7, column=0, sticky="ew", padx=10, pady=(2, 4), columnspan=3)
+        ctk.CTkLabel(cat_row, text="Category:").grid(row=0, column=0, sticky="w")
+        self.category_menu = ctk.CTkOptionMenu(cat_row, values=RUMBLE_CATEGORIES, width=180)
+        self.category_menu.set(DEFAULT_CATEGORY)
+        self.category_menu.grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         # Thumbnail: preview on the left, attach/remove controls beside it
         thumb_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -91,8 +102,10 @@ class MetadataEditor(ctk.CTkFrame):
                 return True
             except Exception:
                 pass
+        # Swap in a blank image rather than image=None: clearing a CTkLabel's image
+        # raises 'image "pyimageN" doesn't exist' once the old image is collected.
+        self.thumb_label.configure(text="[No thumbnail]", image=self._blank_image)
         self._thumb_image = None
-        self.thumb_label.configure(text="[No thumbnail]", image=None)
         self.thumb_name_label.configure(text="")
         return False
 
@@ -139,6 +152,8 @@ class MetadataEditor(ctk.CTkFrame):
         if metadata.tags:
             self.tags_entry.insert(0, ", ".join(metadata.tags[:10]))
 
+        self.category_menu.set(metadata.category if metadata.category in RUMBLE_CATEGORIES else DEFAULT_CATEGORY)
+
         self._show_thumbnail(metadata.thumbnail_local_path)
 
         self.status_label.configure(text="")
@@ -149,6 +164,7 @@ class MetadataEditor(ctk.CTkFrame):
             "title": self.title_entry.get().strip(),
             "description": self.desc_textbox.get("1.0", "end").strip(),
             "tags": [t.strip() for t in self.tags_entry.get().split(",") if t.strip()],
+            "category": self.category_menu.get(),
         }
 
     def _handle_save(self):
@@ -161,6 +177,7 @@ class MetadataEditor(ctk.CTkFrame):
         self.title_entry.delete(0, "end")
         self.desc_textbox.delete("1.0", "end")
         self.tags_entry.delete(0, "end")
+        self.category_menu.set(DEFAULT_CATEGORY)
         self._show_thumbnail(None)
         self.status_label.configure(text="")
 
@@ -170,5 +187,6 @@ class MetadataEditor(ctk.CTkFrame):
         self.desc_textbox.configure(state=state)
         self.tags_entry.configure(state=state)
         self.save_btn.configure(state=state)
+        self.category_menu.configure(state=state)
         self.thumb_btn.configure(state=state)
         self.thumb_clear_btn.configure(state=state)

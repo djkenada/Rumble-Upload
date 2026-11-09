@@ -14,4 +14,12 @@ def _get_project_root():
 PROJECT_ROOT = _get_project_root()
 CHROME_DEBUG_PORT = 9222
 CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), "RumbleUploader_ChromeProfile")
-RUMBLE_UPLOAD_URL = "https://rumble.com/upload.php"
+RUMBLE_STUDIO_URL = "https://studio.rumble.com/home"
+
+# Primary categories offered by Rumble Studio's upload form
+RUMBLE_CATEGORIES = [
+    "Automotive", "Cooking", "Entertainment", "Finance & Crypto", "Gaming",
+    "Health & Science", "HowTo", "Music", "News", "Podcasts", "Sports",
+    "Technology", "Travel", "Viral", "Vlogs",
+]
+DEFAULT_CATEGORY = "News"

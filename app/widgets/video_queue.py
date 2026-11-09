@@ -27,6 +27,8 @@ class VideoQueueItem(ctk.CTkFrame):
         self._on_select = on_select
         self._on_remove = on_remove
         self._thumb_image = None
+        blank = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        self._blank_image = ctk.CTkImage(light_image=blank, dark_image=blank, size=(80, 45))
 
         self.grid_columnconfigure(1, weight=1)
         self.configure(cursor="hand2", border_width=1, border_color="gray30")
@@ -80,7 +82,7 @@ class VideoQueueItem(ctk.CTkFrame):
         m = self.metadata
         self.title_label.configure(text=display_title(m))
 
-        info_parts = []
+        info_parts = [m.category] if m.category else []
         if m.status == "error" and m.error_message:
             info_parts.append(m.error_message[:60])
         if m.scheduled_date:
@@ -99,11 +101,13 @@ class VideoQueueItem(ctk.CTkFrame):
                 self._thumb_image = ctk.CTkImage(light_image=img, dark_image=img, size=(80, 45))
                 self.thumb_label.configure(image=self._thumb_image, text="")
             except Exception:
-                self.thumb_label.configure(text="[img]", image=None)
+                self.thumb_label.configure(text="[img]", image=self._blank_image)
+                self._thumb_image = None
         elif self._thumb_image is not None:
-            # Thumbnail was removed
+            # Thumbnail was removed. Swap in a blank image rather than image=None,
+            # which raises once the old image has been collected.
+            self.thumb_label.configure(text="...", image=self._blank_image)
             self._thumb_image = None
-            self.thumb_label.configure(text="...", image=None)
 
     def set_selected(self, selected: bool):
         if selected:

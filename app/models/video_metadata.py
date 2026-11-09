@@ -10,6 +10,7 @@ class VideoMetadata:
     title: str = ""
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    category: str = "News"  # one of config.RUMBLE_CATEGORIES
     # Optional image the user attached; also never deleted by the app.
     thumbnail_local_path: str | None = None
     scheduled_date: datetime | None = None

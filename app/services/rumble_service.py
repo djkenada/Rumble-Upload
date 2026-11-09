@@ -1,3 +1,12 @@
+"""Upload videos through Rumble Studio (https://studio.rumble.com) by driving Chrome.
+
+Studio's upload is a modal on the dashboard with two steps:
+  Step 1 "Details":    title, description, author, category, thumbnail, tags
+  Step 2 "Visibility": monetization, visibility/schedule, alerts, terms checkboxes
+The video file transfers in the background while step 1 is filled in. "Next" stays
+disabled until the transfer is done, and the footer shows the upload percentage.
+"""
+import datetime
 import os
 import re
 import shutil
@@ -10,14 +19,26 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from app.models.video_metadata import VideoMetadata
-from app.utils.config import CHROME_DEBUG_PORT, CHROME_PROFILE_DIR, RUMBLE_UPLOAD_URL
+from app.utils.config import (
+    CHROME_DEBUG_PORT,
+    CHROME_PROFILE_DIR,
+    DEFAULT_CATEGORY,
+    RUMBLE_STUDIO_URL,
+)
 
-ACTION_DELAY = 2
+ACTION_DELAY = 1
+
+TITLE_MAX = 100          # Studio's limits (the old upload page allowed 255)
+DESCRIPTION_MAX = 5000
+SCHEDULE_STEP_MINUTES = 5  # Studio's time list goes in 5-minute steps
+
+UPLOAD_STALL_TIMEOUT = 15 * 60      # give up if the percentage hasn't moved for this long
+UPLOAD_MAX_TIME = 12 * 60 * 60      # absolute cap for one file
+
+DIALOG = "[role=dialog]"
 
 
 def _find_chrome_exe() -> str:
@@ -42,7 +63,7 @@ def launch_chrome() -> subprocess.Popen:
         chrome_exe,
         f"--remote-debugging-port={CHROME_DEBUG_PORT}",
         f"--user-data-dir={CHROME_PROFILE_DIR}",
-        "https://rumble.com",
+        RUMBLE_STUDIO_URL,
     ])
     return proc
 
@@ -55,105 +76,32 @@ def connect() -> webdriver.Chrome:
     return driver
 
 
+# ---------------------------------------------------------------- helpers
+
+def _visible(elements):
+    return [e for e in elements if e.is_displayed()]
+
+
+def _find_upload_button(driver, timeout=20):
+    """The dashboard's "Upload video" button; only present when signed in to Studio."""
+    end = time.time() + timeout
+    while time.time() < end:
+        buttons = _visible(driver.find_elements(By.XPATH, "//button[normalize-space()='Upload video']"))
+        if buttons:
+            return buttons[0]
+        time.sleep(0.5)
+    return None
+
+
 def check_login_status(driver: webdriver.Chrome) -> bool:
-    driver.get(RUMBLE_UPLOAD_URL)
-    time.sleep(5)
-    current_url = driver.current_url.lower()
-    if "login" in current_url or "auth" in current_url or "sign" in current_url:
-        return False
-    try:
-        driver.find_element(By.ID, "Filedata")
-        return True
-    except Exception:
-        return False
-
-
-def _set_value_js(driver, element, text):
-    driver.execute_script("""
-        var el = arguments[0];
-        var text = arguments[1];
-        el.focus();
-        el.value = text;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-    """, element, text)
-
-
-# Rumble's upload page puts the server-side file name into the hidden #video[]
-# input once the file has fully transferred (or "ERROR" if it failed), and shows
-# the running percentage in .num_percent. Its own submit code checks the same input.
-_UPLOAD_STATE_JS = """
-    var v = document.getElementById('video[]');
-    var pct = document.querySelector('.num_percent');
-    var err = document.getElementById('error_video');
-    return {
-        found: !!v,
-        value: v ? (v.value || '') : '',
-        percent: pct ? (pct.textContent || '').trim() : '',
-        error: (err && err.offsetParent !== null) ? (err.textContent || '').trim() : ''
-    };
-"""
-
-UPLOAD_STALL_TIMEOUT = 15 * 60      # give up if the percentage hasn't moved for this long
-UPLOAD_MAX_TIME = 12 * 60 * 60      # absolute cap for one file
-
-
-def _wait_for_file_upload(driver, progress_callback=None, poll_interval=2):
-    """Block until Rumble reports the video file has finished uploading.
-
-    Raises if Rumble reports an upload error or the upload stops making progress.
-    """
-    start = time.time()
-    last_change = start
-    last_percent = None
-
-    while True:
-        state = driver.execute_script(_UPLOAD_STATE_JS) or {}
-        value = state.get("value", "")
-        percent_text = state.get("percent", "")
-        match = re.match(r"(\d+)\s*%", percent_text)
-        percent = int(match.group(1)) if match else None
-
-        if value == "ERROR" or state.get("error"):
-            raise RuntimeError(f"Rumble reported a file upload error: {state.get('error') or 'upload failed'}")
-        if value:
-            print(f"[Rumble] File upload finished after {int(time.time() - start)}s")
-            return
-        # Fallback in case Rumble renames the hidden input: trust a steady 100%
-        if not state.get("found") and percent == 100:
-            print("[Rumble] File upload at 100% (completion input not found)")
-            return
-
-        now = time.time()
-        if percent != last_percent:
-            last_percent = percent
-            last_change = now
-        if now - last_change > UPLOAD_STALL_TIMEOUT:
-            raise TimeoutError(f"File upload stalled at {percent_text or 'an unknown point'} "
-                               f"for {UPLOAD_STALL_TIMEOUT // 60} minutes.")
-        if now - start > UPLOAD_MAX_TIME:
-            raise TimeoutError("File upload did not finish in time.")
-
-        if progress_callback:
-            shown = percent if percent is not None else 0
-            # Rumble's own text looks like "43%  (120 MB/s - 2m10s)"
-            detail = " ".join(percent_text.split()) or "starting..."
-            progress_callback(0.1 + 0.7 * shown / 100, f"Uploading file: {detail}"[:40])
-        time.sleep(poll_interval)
+    driver.get(RUMBLE_STUDIO_URL)
+    return _find_upload_button(driver) is not None
 
 
 def _click(driver, element, label="element"):
-    """Click an element even when Rumble's floating help widget sits on top of it."""
-    # The Groove support button is fixed to the bottom-right corner and covers
-    # whatever scrolls underneath it, so take it out of the way first.
-    try:
-        driver.execute_script(
-            "document.querySelectorAll('[id^=\"groove-container\"]').forEach("
-            "function (el) { el.style.display = 'none'; });")
-    except Exception:
-        pass
+    """Scroll an element to the middle of its scroll area and click it, with a JS click as fallback."""
     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-    time.sleep(1)
+    time.sleep(0.4)
     try:
         element.click()
     except ElementClickInterceptedException as e:
@@ -161,355 +109,384 @@ def _click(driver, element, label="element"):
         driver.execute_script("arguments[0].click();", element)
 
 
-def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_callback=None) -> bool:
-    """Upload a video to Rumble using Selenium automation.
+def _set_text(driver, element, text):
+    """Set the value of a React-controlled input/textarea so that React sees the change."""
+    driver.execute_script("""
+        var el = arguments[0], text = arguments[1];
+        var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype
+                                              : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+    """, element, text)
+    time.sleep(0.3)
+    if (element.get_attribute("value") or "") != text:
+        # Fall back to typing
+        element.click()
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(Keys.DELETE)
+        element.send_keys(text)
 
-    Rumble upload is a two-step form:
-      Form 1: file, title, description, thumbnail, tags, categories, visibility/schedule
-      Form 2: copyright/terms checkboxes, final submit
+
+def _dialog(driver):
+    dialogs = driver.find_elements(By.CSS_SELECTOR, DIALOG)
+    if not dialogs:
+        raise RuntimeError("Rumble Studio's upload window closed unexpectedly.")
+    return dialogs[0]
+
+
+_FOOTER_STATE_JS = """
+    var d = document.querySelector('[role=dialog]');
+    if (!d) return {open: false};
+    var err = d.querySelector('[data-sentry-component="CIVideoUploadFooterErrorMessage"]');
+    var done = d.querySelector('[role=status][aria-live]');
+    var busy = d.querySelector('[data-sentry-component="CIVideoUploadFooterUploadStatus"]');
+    function txt(e) { return e ? (e.innerText || '').replace(/\\s+/g, ' ').trim() : ''; }
+    return {open: true, error: txt(err), done: txt(done), busy: txt(busy)};
+"""
+
+
+def _footer_state(driver) -> dict:
+    return driver.execute_script(_FOOTER_STATE_JS) or {"open": False}
+
+
+def _raise_on_footer_error(driver):
+    state = _footer_state(driver)
+    if state.get("error"):
+        raise RuntimeError(f"Rumble reported: {state['error']}")
+    return state
+
+
+def _wait_for_file_upload(driver, progress_callback=None, poll_interval=2):
+    """Block until Studio reports the video file has finished uploading and passed its checks.
+
+    While uploading, the footer reads "Uploading 43% · 12 MB/s ... 2m left"; when
+    finished it becomes "Checks complete. No issues found.". Raises if Studio shows
+    an error or the percentage stops moving.
+    """
+    start = time.time()
+    last_change = start
+    last_seen = None
+
+    while True:
+        state = _footer_state(driver)
+        if not state.get("open"):
+            raise RuntimeError("Rumble Studio's upload window closed before the upload finished.")
+        if state.get("error"):
+            raise RuntimeError(f"Rumble reported a file upload error: {state['error']}")
+        if "complete" in state.get("done", "").lower():
+            print(f"[Rumble] File upload finished after {int(time.time() - start)}s")
+            return
+
+        busy = state.get("busy", "")
+        match = re.search(r"(\d+)\s*%", busy)
+        percent = int(match.group(1)) if match else None
+
+        now = time.time()
+        if percent != last_seen:
+            last_seen = percent
+            last_change = now
+        if now - last_change > UPLOAD_STALL_TIMEOUT:
+            where = f"{percent}%" if percent is not None else "an unknown point"
+            raise TimeoutError(f"File upload stalled at {where} for {UPLOAD_STALL_TIMEOUT // 60} minutes.")
+        if now - start > UPLOAD_MAX_TIME:
+            raise TimeoutError("File upload did not finish in time.")
+
+        if progress_callback:
+            shown = percent if percent is not None else 0
+            progress_callback(0.1 + 0.7 * shown / 100, (busy or "Preparing upload...")[:40])
+        time.sleep(poll_interval)
+
+
+def _select_category(driver, dialog, category: str):
+    """Pick the primary category. Studio pre-fills the one used last time, so always set it."""
+    dropdowns = dialog.find_elements(By.XPATH, ".//button[img[@alt='Down arrow']]")
+    if not dropdowns:
+        raise RuntimeError("Category selector not found.")
+    primary = dropdowns[0]
+    if primary.text.strip() == category:
+        return
+    _click(driver, primary, "Category")
+    time.sleep(0.8)
+    search = _visible(driver.find_elements(By.CSS_SELECTOR, "input[placeholder='Search']"))
+    if search:
+        search[0].send_keys(category)
+        time.sleep(0.8)
+    options = _visible(driver.find_elements(
+        By.XPATH, f"//span[normalize-space()=\"{category}\" and not(ancestor::button)]"))
+    if not options:
+        # Close the list again and report
+        primary.click()
+        raise RuntimeError(f"Rumble has no category called '{category}'.")
+    options[0].click()
+    time.sleep(0.6)
+    chosen = dialog.find_elements(By.XPATH, ".//button[img[@alt='Down arrow']]")[0].text.strip()
+    if chosen != category:
+        raise RuntimeError(f"Category did not change to '{category}' (shows '{chosen}').")
+
+
+def round_schedule(dt):
+    """Round a datetime to Studio's 5-minute grid."""
+    step = SCHEDULE_STEP_MINUTES
+    total = dt.hour * 60 + dt.minute + (1 if dt.second >= 30 else 0)
+    rounded = int(round(total / step) * step)
+    base = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return base + datetime.timedelta(minutes=rounded)
+
+
+def _set_schedule(driver, dialog, when):
+    """Choose "Scheduled" and pick the date and time in Studio's date picker."""
+    when = round_schedule(when)
+    radio = dialog.find_element(By.CSS_SELECTOR, "button[role=radio][value='scheduled']")
+    _click(driver, radio, "Scheduled")
+    time.sleep(1)
+    field = dialog.find_element(By.CSS_SELECTOR, "input[placeholder='Pick a time']")
+
+    def open_picker():
+        if not driver.find_elements(By.CSS_SELECTOR, ".react-datepicker"):
+            _click(driver, field, "Schedule date")
+            time.sleep(0.8)
+
+    open_picker()
+    target_month = when.strftime("%B %Y")
+    for _ in range(36):
+        current = driver.find_element(By.CSS_SELECTOR, ".react-datepicker__current-month").text.strip()
+        if current == target_month:
+            break
+        cur_dt = datetime.datetime.strptime(current, "%B %Y")
+        forward = (when.year, when.month) > (cur_dt.year, cur_dt.month)
+        nav = driver.find_elements(
+            By.CSS_SELECTOR,
+            ".react-datepicker__navigation--next" if forward else ".react-datepicker__navigation--previous")
+        if not nav:
+            raise RuntimeError(f"Rumble won't schedule in {target_month}; that month isn't selectable.")
+        nav[0].click()
+        time.sleep(0.3)
+    else:
+        raise RuntimeError(f"Could not reach {target_month} in Rumble's date picker.")
+
+    day = driver.find_element(
+        By.CSS_SELECTOR,
+        f".react-datepicker__day--{when.day:03d}:not(.react-datepicker__day--outside-month)")
+    if day.get_attribute("aria-disabled") == "true":
+        raise RuntimeError(f"Rumble won't schedule on {when.strftime('%m/%d/%Y')}; the date is in the past.")
+    day.click()
+    time.sleep(0.6)
+
+    open_picker()
+    hour12 = when.hour % 12 or 12
+    label = f"{hour12}:{when.minute:02d} {'AM' if when.hour < 12 else 'PM'}"
+    slot = driver.find_element(
+        By.XPATH, f"//li[contains(@class,'react-datepicker__time-list-item') and normalize-space()='{label}']")
+    if "disabled" in (slot.get_attribute("class") or ""):
+        raise RuntimeError(f"Rumble won't schedule at {label} on that day; the time is in the past.")
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", slot)
+    time.sleep(0.2)
+    slot.click()
+    time.sleep(0.6)
+
+    # The field reads like "Thursday, December 03, 2026 9:30AM"
+    shown = field.get_attribute("value") or ""
+    expected = f"{when.strftime('%A, %B %d, %Y')} {hour12}:{when.minute:02d}{'AM' if when.hour < 12 else 'PM'}"
+    if shown != expected:
+        raise RuntimeError(f"Schedule shows '{shown}', expected '{expected}'.")
+    print(f"[Rumble] Scheduled: {shown}")
+
+
+def _footer_button(dialog):
+    """The primary footer button: "Next" (go to next step) or "Finish" (finish and close)."""
+    for label in ("Finish and close", "Go to next step"):
+        found = dialog.find_elements(By.CSS_SELECTOR, f"button[aria-label='{label}']")
+        if found:
+            return found[0], label
+    raise RuntimeError("Next/Finish button not found in Rumble Studio's upload window.")
+
+
+def _click_footer(driver, expect_label):
+    button, label = _footer_button(_dialog(driver))
+    if label != expect_label:
+        raise RuntimeError(f"Expected the '{expect_label}' button but found '{label}'.")
+    end = time.time() + 20
+    while button.get_attribute("aria-disabled") == "true" and time.time() < end:
+        time.sleep(0.5)
+        button, label = _footer_button(_dialog(driver))
+    if button.get_attribute("aria-disabled") == "true":
+        _raise_on_footer_error(driver)
+        raise RuntimeError(f"Rumble keeps '{button.text.strip() or expect_label}' disabled; "
+                           "a required field is probably missing.")
+    _click(driver, button, expect_label)
+
+
+# ---------------------------------------------------------------- upload
+
+def upload_video(driver: webdriver.Chrome, metadata: VideoMetadata, progress_callback=None,
+                 finish: bool = True) -> bool:
+    """Upload one video through Rumble Studio.
+
+    With finish=False everything is filled in but the final "Finish" button is not
+    clicked, so nothing is published (used for testing).
     """
     if not metadata.local_file_path or not os.path.exists(metadata.local_file_path):
         raise FileNotFoundError(f"Video file not found: {metadata.local_file_path}")
 
-    print(f"[Rumble] Starting upload for: {metadata.title}")
+    def report(pct, status):
+        if progress_callback:
+            progress_callback(pct, status)
+
+    title = (metadata.title or "").strip()[:TITLE_MAX]
+    if not title:
+        raise ValueError("A title is required.")
+    # Studio requires a description; fall back to the title rather than fail.
+    description = (metadata.description or "").strip()[:DESCRIPTION_MAX] or title
+    category = metadata.category or DEFAULT_CATEGORY
+
+    print(f"[Rumble] Starting upload for: {title}")
     print(f"[Rumble] File: {metadata.local_file_path}")
 
-    if progress_callback:
-        progress_callback(0.0, "Navigating to Rumble upload page...")
-
-    driver.get(RUMBLE_UPLOAD_URL)
-    time.sleep(3)
-
-    wait = WebDriverWait(driver, 30)
-
-    # ---- STEP 1: Upload the video file ----
-    file_input = wait.until(EC.presence_of_element_located((By.ID, "Filedata")))
+    # ---- Open the upload window ----
+    report(0.0, "Opening Rumble Studio...")
+    driver.get(RUMBLE_STUDIO_URL)
+    upload_button = _find_upload_button(driver)
+    if not upload_button:
+        raise RuntimeError("Not logged into Rumble Studio. Log in in the Chrome window, then try again.")
     time.sleep(ACTION_DELAY)
+    _click(driver, upload_button, "Upload video")
 
-    if progress_callback:
-        progress_callback(0.01, "Sending video file...")
+    end = time.time() + 20
+    file_input = None
+    while time.time() < end and file_input is None:
+        found = driver.find_elements(By.CSS_SELECTOR, f"{DIALOG} input[type=file][accept^='video']")
+        file_input = found[0] if found else None
+        time.sleep(0.5)
+    if file_input is None:
+        raise RuntimeError("Rumble Studio's upload window did not open.")
 
-    file_input.send_keys(metadata.local_file_path)
-    print(f"[Rumble] File sent to upload input")
+    # ---- Step 1: choose the file; the transfer starts straight away ----
+    report(0.01, "Sending video file...")
+    file_input.send_keys(os.path.abspath(metadata.local_file_path))
+    print("[Rumble] File sent to upload input")
 
-    if progress_callback:
-        progress_callback(0.02, "Waiting for the upload form...")
-
-    # Wait for the title field to become visible (means file upload is processing)
+    report(0.02, "Waiting for the details form...")
+    end = time.time() + 120
     title_field = None
-    start_time = time.time()
-    while time.time() - start_time < 1800:
-        try:
-            el = driver.find_element(By.ID, "title")
-            if el.is_displayed():
-                title_field = el
-                break
-        except Exception:
-            pass
-        time.sleep(5)
-        elapsed = time.time() - start_time
-        if progress_callback:
-            progress_callback(0.02, f"Waiting for the upload form... ({int(elapsed)}s)")
-
-    if not title_field:
-        raise TimeoutError("Title field did not appear. Upload may have failed.")
-
-    print(f"[Rumble] Upload form appeared after {int(time.time() - start_time)}s")
+    while time.time() < end and title_field is None:
+        _raise_on_footer_error(driver)
+        found = _visible(driver.find_elements(By.CSS_SELECTOR, f"{DIALOG} input[placeholder^='Title']"))
+        title_field = found[0] if found else None
+        time.sleep(0.5)
+    if title_field is None:
+        raise TimeoutError("Rumble Studio did not show the details form after choosing the file.")
+    dialog = _dialog(driver)
     time.sleep(ACTION_DELAY)
 
-    # ---- STEP 2: Fill title ----
-    if progress_callback:
-        progress_callback(0.03, "Filling title...")
+    report(0.03, "Filling title...")
+    _set_text(driver, title_field, title)
+    print(f"[Rumble] Title: {title[:60]}")
 
-    title_field.click()
-    time.sleep(0.5)
-    title_field.send_keys(Keys.CONTROL, "a")
-    time.sleep(0.3)
-    title_field.send_keys(metadata.title[:255])
-    time.sleep(ACTION_DELAY)
-    print(f"[Rumble] Title: {metadata.title[:60]}")
+    report(0.04, "Filling description...")
+    desc_field = dialog.find_element(By.CSS_SELECTOR, "textarea[placeholder^='Description']")
+    _set_text(driver, desc_field, description)
+    print(f"[Rumble] Description filled ({len(description)} chars)")
 
-    # ---- STEP 3: Fill description ----
-    if progress_callback:
-        progress_callback(0.04, "Filling description...")
+    report(0.05, "Setting category...")
+    _select_category(driver, dialog, category)
+    print(f"[Rumble] Category: {category}")
 
-    desc_text = metadata.description[:5000] if metadata.description else ""
-    if desc_text:
-        try:
-            desc_field = driver.find_element(By.ID, "description")
-            if desc_field.is_displayed():
-                desc_field.click()
-                time.sleep(0.5)
-                # Use JS to set value (faster and more reliable for large text)
-                _set_value_js(driver, desc_field, desc_text)
-                time.sleep(0.5)
-                # Verify
-                current_val = desc_field.get_attribute("value") or ""
-                if len(current_val) < 10 and len(desc_text) > 10:
-                    # JS failed, use send_keys
-                    desc_field.send_keys(Keys.CONTROL, "a")
-                    time.sleep(0.3)
-                    desc_field.send_keys(desc_text[:2000])  # Limit for send_keys
-                time.sleep(ACTION_DELAY)
-                print(f"[Rumble] Description filled ({len(desc_text)} chars)")
-            else:
-                print(f"[Rumble] Description field not displayed")
-        except Exception as e:
-            print(f"[Rumble] Description error: {e}")
-
-    # ---- STEP 4: Upload thumbnail ----
-    if progress_callback:
-        progress_callback(0.05, "Uploading thumbnail...")
-
-    if metadata.thumbnail_local_path and os.path.exists(metadata.thumbnail_local_path):
-        try:
-            # Find the actual file input for thumbnail (may be hidden)
-            # First try to find an input[type=file] related to thumbnails
-            thumb_path = os.path.abspath(metadata.thumbnail_local_path)
-            thumb_uploaded = False
-
-            # Try direct file input by ID
-            try:
-                thumb_input = driver.find_element(By.ID, "customThumb")
-                tag = thumb_input.tag_name.lower()
-                input_type = thumb_input.get_attribute("type") or ""
-                if tag == "input" and input_type.lower() == "file":
-                    thumb_input.send_keys(thumb_path)
-                    thumb_uploaded = True
-                    print(f"[Rumble] Thumbnail uploaded via #customThumb input")
-                else:
-                    print(f"[Rumble] #customThumb is {tag}[{input_type}], not file input")
-            except Exception:
-                pass
-
-            # If that didn't work, find any hidden file input near thumbnail area
-            if not thumb_uploaded:
-                try:
-                    file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                    for fi in file_inputs:
-                        name = fi.get_attribute("name") or ""
-                        fid = fi.get_attribute("id") or ""
-                        accept = fi.get_attribute("accept") or ""
-                        if any(kw in (name + fid + accept).lower() for kw in ["thumb", "image", "photo", "custom"]):
-                            # Make visible if hidden
-                            driver.execute_script("arguments[0].style.display='block'; arguments[0].style.visibility='visible';", fi)
-                            fi.send_keys(thumb_path)
-                            thumb_uploaded = True
-                            print(f"[Rumble] Thumbnail uploaded via file input: {name or fid}")
-                            break
-                except Exception as e2:
-                    print(f"[Rumble] Hidden file input search error: {e2}")
-
-            if not thumb_uploaded:
-                print(f"[Rumble] Skipping thumbnail - no suitable file input found")
-
-            time.sleep(ACTION_DELAY)
-        except Exception as e:
-            print(f"[Rumble] Thumbnail error: {e}")
-
-    # ---- STEP 5: Fill tags ----
-    if progress_callback:
-        progress_callback(0.06, "Filling tags...")
-
-    tags_str = ", ".join(metadata.tags[:10]) if metadata.tags else ""
+    tags_str = ", ".join(t.strip() for t in (metadata.tags or [])[:10] if t.strip())
     if tags_str:
+        report(0.07, "Filling tags...")
         try:
-            tags_field = driver.find_element(By.ID, "tags")
-            if tags_field.is_displayed():
-                tags_field.click()
-                time.sleep(0.5)
-                tags_field.send_keys(Keys.CONTROL, "a")
-                time.sleep(0.3)
-                tags_field.send_keys(tags_str)
-                time.sleep(ACTION_DELAY)
-                print(f"[Rumble] Tags: {tags_str[:60]}")
+            tags_field = dialog.find_element(By.CSS_SELECTOR, "input[placeholder='Add tags']")
+            _set_text(driver, tags_field, tags_str)
+            print(f"[Rumble] Tags: {tags_str[:60]}")
         except Exception as e:
-            print(f"[Rumble] Tags error: {e}")
+            print(f"[Rumble] Tags error: {str(e).splitlines()[0]}")
 
-    # ---- STEP 6: Select category (News) ----
-    if progress_callback:
-        progress_callback(0.07, "Setting category...")
-
-    time.sleep(ACTION_DELAY)
-    try:
-        # Click the category input to open the dropdown
-        cat_input = driver.find_element(By.CSS_SELECTOR, "input[name='primary-category']")
-        cat_input.click()
-        time.sleep(1)
-
-        # Find and click the "News" option
-        news_option = driver.find_element(By.CSS_SELECTOR, "div.select-option[data-label='News']")
-        news_option.click()
-        time.sleep(1)
-
-        # Verify the hidden value was set
-        hidden_val = driver.find_element(By.ID, "category_primary").get_attribute("value")
-        print(f"[Rumble] Category set to News (value={hidden_val})")
-    except Exception as e:
-        print(f"[Rumble] Category error: {e}")
-        # Fallback: try setting via JS
-        try:
-            driver.execute_script("""
-                var opt = document.querySelector('div.select-option[data-label="News"]');
-                if (opt) { opt.click(); }
-            """)
-            time.sleep(1)
-            print(f"[Rumble] Category set via JS fallback")
-        except Exception:
-            pass
-
-    # ---- STEP 7: Set visibility / schedule ----
-    if progress_callback:
-        progress_callback(0.08, "Setting visibility/schedule...")
-
-    time.sleep(ACTION_DELAY)
-
-    # Scroll to the bottom of the page so schedule/visibility fields are visible
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1.5)
-    print("[Rumble] Scrolled to bottom of page")
-
-    if metadata.scheduled_date:
-        # Click the "scheduler" radio button to enable scheduling
-        try:
-            scheduler_radio = driver.find_element(By.ID, "scheduler")
-            # Scroll the radio into view first
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", scheduler_radio)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", scheduler_radio)
-            time.sleep(ACTION_DELAY)
-
-            # Set the date via the daterangepicker jQuery API
-            # Rumble daterangepicker format: "3/25/2026 - 08:00 am"
-            d = metadata.scheduled_date
-            schedule_str = f"{d.month}/{d.day}/{d.year} - {d.strftime('%I:%M %p').lower()}"
-            driver.execute_script("""
-                var dp = $('#scheduler_datetime').data('daterangepicker');
-                if (dp) {
-                    var m = moment(arguments[0]);
-                    dp.setStartDate(m);
-                    dp.setEndDate(m);
-                }
-                // Also set the input value directly as backup
-                document.getElementById('scheduler_datetime').value = arguments[0];
-            """, schedule_str)
-            time.sleep(ACTION_DELAY)
-
-            # Click the Apply button on the date picker if visible
-            try:
-                apply_btn = driver.find_element(By.CSS_SELECTOR, ".daterangepicker .applyBtn")
-                if apply_btn.is_displayed():
-                    apply_btn.click()
-                    time.sleep(1)
-            except Exception:
-                pass
-
-            # Click elsewhere to close the picker
-            driver.find_element(By.TAG_NAME, "body").click()
-            time.sleep(1)
-
-            print(f"[Rumble] Scheduled: {schedule_str}")
-        except Exception as e:
-            print(f"[Rumble] Schedule error: {e}")
-            # Fall back to public
-            try:
-                public_radio = driver.find_element(By.ID, "visibility_public")
-                driver.execute_script("arguments[0].click();", public_radio)
-                time.sleep(ACTION_DELAY)
-            except Exception:
-                pass
-    else:
-        # Set to public
-        try:
-            public_radio = driver.find_element(By.ID, "visibility_public")
-            driver.execute_script("arguments[0].click();", public_radio)
-            time.sleep(ACTION_DELAY)
-            print(f"[Rumble] Visibility: public")
-        except Exception as e:
-            print(f"[Rumble] Visibility error: {e}")
-
-    # ---- STEP 8: Wait for the video file itself to finish uploading ----
-    # The form above is filled in while the file transfers; the Upload button
-    # must not be pressed until Rumble has the whole file.
+    # ---- Wait for the file itself; Studio keeps "Next" disabled until then ----
     _wait_for_file_upload(driver, progress_callback)
 
-    # ---- STEP 9: Click "Upload" button (first form submit) ----
-    if progress_callback:
-        progress_callback(0.8, "Submitting form 1...")
-
-    time.sleep(ACTION_DELAY)
-    try:
-        submit1 = driver.find_element(By.ID, "submitForm")
-        _click(driver, submit1, "Upload button")
-        print(f"[Rumble] Form 1 submitted (Upload button clicked)")
-    except Exception as e:
-        raise RuntimeError(f"Could not click Upload button: {str(e).splitlines()[0]}")
-
-    # ---- STEP 10: Wait for form 2 (copyright/terms) ----
-    if progress_callback:
-        progress_callback(0.85, "Waiting for terms page...")
-
-    time.sleep(5)
-
-    # Wait for the copyright/terms checkboxes to appear
-    try:
-        crights = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.ID, "crights"))
-        )
-        time.sleep(ACTION_DELAY)
-
-        # Check copyright checkbox
-        if not crights.is_selected():
-            driver.execute_script("arguments[0].click();", crights)
-            time.sleep(1)
-        print(f"[Rumble] Copyright checkbox checked")
-
-        # Check terms checkbox
-        cterms = driver.find_element(By.ID, "cterms")
-        if not cterms.is_selected():
-            driver.execute_script("arguments[0].click();", cterms)
-            time.sleep(1)
-        print(f"[Rumble] Terms checkbox checked")
-    except Exception as e:
-        print(f"[Rumble] Terms page error: {e}")
-        # Try to find any visible checkboxes
+    # ---- Thumbnail: Studio only accepts it once the video itself has finished uploading ----
+    if metadata.thumbnail_local_path and os.path.exists(metadata.thumbnail_local_path):
+        report(0.81, "Uploading thumbnail...")
         try:
-            checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
-            for cb in checkboxes:
-                if cb.is_displayed() and not cb.is_selected():
-                    driver.execute_script("arguments[0].click();", cb)
-                    time.sleep(1)
-        except Exception:
-            pass
+            thumb_input = dialog.find_element(By.CSS_SELECTOR, "input[type=file][accept^='image']")
+            thumb_input.send_keys(os.path.abspath(metadata.thumbnail_local_path))
+            end = time.time() + 30
+            attached = False
+            while time.time() < end and not attached:
+                attached = bool(dialog.find_elements(By.CSS_SELECTOR, "img[alt='custom-thumbnail-preview']"))
+                time.sleep(0.5)
+            print("[Rumble] Thumbnail attached" if attached
+                  else "[Rumble] Thumbnail was sent but Studio did not show a preview")
+        except Exception as e:
+            print(f"[Rumble] Thumbnail error: {str(e).splitlines()[0]}")
 
-    if progress_callback:
-        progress_callback(0.9, "Final submit...")
-
-    # ---- STEP 11: Click final "Submit" button (form 2) ----
+    report(0.82, "Opening visibility step...")
     time.sleep(ACTION_DELAY)
-    try:
-        submit2 = driver.find_element(By.ID, "submitForm2")
-        # Wait for it to become visible/clickable
-        WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.ID, "submitForm2"))
-        )
-        _click(driver, submit2, "Submit button")
-        print(f"[Rumble] Form 2 submitted (final Submit clicked)")
-    except Exception as e:
-        print(f"[Rumble] Form 2 submit error: {e}")
-        # Try alternative
-        try:
-            submit2 = driver.find_element(By.ID, "submitForm2")
-            driver.execute_script("arguments[0].click();", submit2)
-            print(f"[Rumble] Form 2 submitted via JS click")
-        except Exception as e2:
-            raise RuntimeError(f"Could not click final Submit: {e2}")
+    _click_footer(driver, "Go to next step")
+    time.sleep(1.5)
+    dialog = _dialog(driver)
 
-    # Wait for confirmation
-    time.sleep(10)
+    # ---- Step 2: visibility / schedule ----
+    report(0.86, "Setting visibility...")
+    section = dialog.find_element(
+        By.XPATH, ".//button[@aria-expanded and starts-with(normalize-space(), 'Visibility')]")
+    if section.get_attribute("aria-expanded") == "false":
+        _click(driver, section, "Visibility")
+        time.sleep(1)
+    if metadata.scheduled_date:
+        _set_schedule(driver, dialog, metadata.scheduled_date)
+    else:
+        public = dialog.find_element(By.CSS_SELECTOR, "button[role=radio][value='public']")
+        if public.get_attribute("aria-checked") != "true":
+            _click(driver, public, "Public")
+            time.sleep(0.5)
+        print("[Rumble] Visibility: public")
 
-    if progress_callback:
-        progress_callback(1.0, "Upload submitted!")
+    # Some accounts get an extra "Campaigns" step before the last one
+    for _ in range(2):
+        _, label = _footer_button(_dialog(driver))
+        if label == "Finish and close":
+            break
+        _click_footer(driver, "Go to next step")
+        time.sleep(1.5)
 
-    print(f"[Rumble] Upload complete for: {metadata.title}")
-    return True
+    # ---- Terms ----
+    report(0.9, "Accepting terms...")
+    dialog = _dialog(driver)
+    for box_id in ("ci-rumble-exclusive-agreement", "ci-rumble-terms-agreement"):
+        box = dialog.find_element(By.ID, box_id)
+        if box.get_attribute("aria-checked") != "true":
+            _click(driver, box, box_id)
+            time.sleep(0.5)
+        if _dialog(driver).find_element(By.ID, box_id).get_attribute("aria-checked") != "true":
+            raise RuntimeError("Could not tick Rumble's terms checkboxes.")
+    print("[Rumble] Terms checkboxes ticked")
+
+    if not finish:
+        button, label = _footer_button(_dialog(driver))
+        ready = label == "Finish and close" and button.get_attribute("aria-disabled") != "true"
+        print(f"[Rumble] Dry run: stopping before Finish (Finish enabled: {ready})")
+        if not ready:
+            raise RuntimeError("Finish button is not enabled at the end of the form.")
+        report(0.95, "Dry run: ready to finish")
+        return True
+
+    # ---- Finish ----
+    report(0.95, "Finishing...")
+    time.sleep(ACTION_DELAY)
+    _click_footer(driver, "Finish and close")
+    print("[Rumble] Finish clicked")
+
+    # On success Studio closes the window; on failure it shows an error in the footer
+    end = time.time() + 180
+    while time.time() < end:
+        state = _footer_state(driver)
+        if not state.get("open"):
+            report(1.0, "Upload finished!")
+            print(f"[Rumble] Upload complete for: {title}")
+            return True
+        if state.get("error"):
+            raise RuntimeError(f"Rumble could not finish the upload: {state['error']}")
+        time.sleep(1)
+    raise TimeoutError("Rumble Studio did not confirm the upload after clicking Finish.")

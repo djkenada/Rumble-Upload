@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 
 from app.models.video_metadata import VideoMetadata
-from app.utils.config import PROJECT_ROOT
+from app.utils.config import DEFAULT_CATEGORY, PROJECT_ROOT
 
 DATA_FILE = os.path.join(PROJECT_ROOT, "queue_data.json")
 
@@ -18,6 +18,7 @@ def save_queue(queue: list[VideoMetadata]):
             "title": m.title,
             "description": m.description,
             "tags": m.tags,
+            "category": m.category,
             "thumbnail_local_path": m.thumbnail_local_path,
             "scheduled_date": m.scheduled_date.isoformat() if m.scheduled_date else None,
             "status": m.status,
@@ -57,6 +58,7 @@ def load_queue() -> list[VideoMetadata]:
             title=entry.get("title", ""),
             description=entry.get("description", ""),
             tags=entry.get("tags", []),
+            category=entry.get("category") or DEFAULT_CATEGORY,
             thumbnail_local_path=entry.get("thumbnail_local_path"),
             status=entry.get("status", "ready"),
             error_message=entry.get("error_message", ""),

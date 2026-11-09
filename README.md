@@ -13,7 +13,8 @@ A Windows desktop app that batch uploads video files from your computer to Rumbl
 - **Manual Scheduling** - Override individual video schedule dates with the built-in date/time picker (Central Time, AM/PM)
 - **Queue Persistence** - Your video queue auto-saves every 10 seconds and survives app restarts
 - **Progress Tracking** - A progress bar shows the status of the current upload
-- **Category Auto-Set** - Automatically sets the Rumble category to News
+- **Category per Video** - Pick any of Rumble's primary categories for each video (defaults to News)
+- **Rumble Studio** - Uploads go through the current Rumble Studio upload flow
 - **Your files stay put** - The app never moves or deletes your videos or thumbnails
 
 ---
@@ -31,17 +32,18 @@ A Windows desktop app that batch uploads video files from your computer to Rumbl
 ## Quick Start
 
 ### 1. Open the Browser
-Click **"Open Browser"** in the app. This opens a dedicated Chrome window that the app controls for Rumble uploads.
+Click **"Open Browser"** in the app. This opens a dedicated Chrome window on Rumble Studio (studio.rumble.com) that the app controls for uploads.
 
 ### 2. Log In
-In that Chrome window, log in to your Rumble account. The login is remembered in a separate Chrome profile, so you normally only do this once.
+In that Chrome window, log in to your Rumble account until you see the Studio dashboard. The login is remembered in a separate Chrome profile, so you normally only do this once.
 
 ### 3. Add Videos
 Click **"Add Video Files"** and pick one or more videos. Each one appears in the queue as READY, with the file name as its title.
 
 ### 4. Review & Edit
 Click a video in the queue to edit it on the right:
-- Edit the title, description, and tags, then click **"Save Changes"**
+- Edit the title, description, and tags, pick a category, then click **"Save Changes"**
+- Rumble Studio limits titles to 100 characters and requires a description; if you leave the description empty, the title is used
 - Click **"Attach Thumbnail"** to pick a JPG or PNG (applies immediately), or **"Remove"** to clear it
 
 ### 5. Schedule (optional)
@@ -50,10 +52,10 @@ Use the schedule panel to assign publish times:
 - Click **"Auto-Schedule"** to assign times to every video that is ready
 - Or select one video and click **"Set Selected"** to give it its own time
 
-Videos without a schedule date are published right away.
+Videos without a schedule date are published right away. Rumble Studio schedules in 5-minute steps, so times are rounded to the nearest 5 minutes, and it uses the time zone of the computer running the app.
 
 ### 6. Upload
-Click **"Upload All"**. The app uploads each ready video in turn. Videos that failed earlier are retried. **"Stop"** lets the current upload finish and starts no more.
+Click **"Upload All"**. The app uploads each ready video in turn, waiting for Rumble to finish receiving each file before it moves on to the visibility step and clicks Finish. Videos that failed earlier are retried. **"Stop"** lets the current upload finish and starts no more.
 
 ---
 
@@ -62,20 +64,18 @@ Click **"Upload All"**. The app uploads each ready video in turn. Videos that fa
 ```
 Video file on disk
       │
-      ├── Title, description, tags (edited in the app)
+      ├── Title, description, tags, category (edited in the app)
       ├── Thumbnail (optional)
       └── Schedule date/time (optional)
       v
-Upload to Rumble
-      ├── Video file
-      ├── Title & Description
-      ├── Tags
-      ├── Thumbnail
-      ├── Category (News)
-      └── Schedule date/time
+Rumble Studio "Upload video"
+      ├── Step 1: file, title, description, category, tags, thumbnail
+      ├── waits for the file upload and Rumble's checks to finish
+      ├── Step 2: Public or Scheduled, terms checkboxes
+      └── Finish
 ```
 
-The Rumble upload is automated via Selenium, controlling the Chrome window you logged into. The app fills in every field on Rumble's upload form, scrolls to the scheduler, sets the date and time, and submits.
+The upload is automated via Selenium, controlling the Chrome window you logged into. Videos are posted to your user account (Studio's default author), with Studio's default monetization setting.
 
 ---
 
@@ -84,8 +84,8 @@ The Rumble upload is automated via Selenium, controlling the Chrome window you l
 ### "Could not connect to Chrome"
 Click **"Open Browser"** first. The app can only control the Chrome window it opened itself.
 
-### "Not logged into Rumble"
-Log in to Rumble in the Chrome window the app opened, then click **"Upload All"** again.
+### "Not logged into Rumble Studio"
+Log in at studio.rumble.com in the Chrome window the app opened, then click **"Upload All"** again.
 
 ### Rumble upload not working
 - **Do not click or interact with the Chrome window** while uploads are in progress
