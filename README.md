@@ -1,6 +1,8 @@
 # Rumble Uploader
 
-A Windows desktop app that batch uploads video files from your computer to Rumble with titles, descriptions, tags, thumbnails, and scheduling.
+A Windows desktop app that batch uploads video files from your computer to Rumble with titles, descriptions, tags, categories, thumbnails, and scheduling.
+
+> **Version 2 is a different app from v1.0.0.** Earlier versions downloaded videos from YouTube and re-uploaded them. That has been removed entirely: the app now only uploads video files you already have on your computer, through Rumble Studio. See [What's New](#whats-new-in-version-2).
 
 ---
 
@@ -10,7 +12,7 @@ A Windows desktop app that batch uploads video files from your computer to Rumbl
 - **Editable Metadata** - Select any video to edit its title, description, and tags before uploading
 - **Thumbnails** - Attach a JPG or PNG thumbnail to any video
 - **Auto Scheduling** - Set a start date/time and interval, and the app assigns schedule dates to all videos automatically
-- **Manual Scheduling** - Override individual video schedule dates with the built-in date/time picker (Central Time, AM/PM)
+- **Manual Scheduling** - Override individual video schedule dates with the built-in date/time picker (AM/PM, in your computer's time zone)
 - **Queue Persistence** - Your video queue auto-saves every 10 seconds and survives app restarts
 - **Progress Tracking** - A progress bar shows the status of the current upload
 - **Category per Video** - Pick any of Rumble's primary categories for each video (defaults to News)
@@ -26,6 +28,22 @@ A Windows desktop app that batch uploads video files from your computer to Rumbl
 | **OS** | Windows 10 or Windows 11 |
 | **Browser** | Google Chrome (any recent version) |
 | **Account** | A Rumble account |
+| **Python** | Python 3.12 or newer (to run from source) |
+
+---
+
+## Installation
+
+Version 2 currently runs from source:
+
+```bash
+git clone https://github.com/djkenada/Rumble-Upload.git
+cd Rumble-Upload
+pip install -r requirements.txt
+python main.py
+```
+
+The `RumbleUploader.zip` attached to the **v1.0.0** release is the old YouTube-based version and does not include any of the features described here.
 
 ---
 
@@ -44,11 +62,13 @@ Click **"Add Video Files"** and pick one or more videos. Each one appears in the
 Click a video in the queue to edit it on the right:
 - Edit the title, description, and tags, pick a category, then click **"Save Changes"**
 - Rumble Studio limits titles to 100 characters and requires a description; if you leave the description empty, the title is used
+- Up to 10 tags are sent, separated by commas
+- Categories: Automotive, Cooking, Entertainment, Finance & Crypto, Gaming, Health & Science, HowTo, Music, News, Podcasts, Sports, Technology, Travel, Viral, Vlogs
 - Click **"Attach Thumbnail"** to pick a JPG or PNG (applies immediately), or **"Remove"** to clear it
 
 ### 5. Schedule (optional)
 Use the schedule panel to assign publish times:
-- Set a **start date** and **start time** (Central Time, AM/PM format) and an **interval**
+- Set a **start date** and **start time** (AM/PM format) and an **interval**
 - Click **"Auto-Schedule"** to assign times to every video that is ready
 - Or select one video and click **"Set Selected"** to give it its own time
 
@@ -90,6 +110,16 @@ Log in at studio.rumble.com in the Chrome window the app opened, then click **"U
 ### Rumble upload not working
 - **Do not click or interact with the Chrome window** while uploads are in progress
 - The app needs full control of the browser to fill forms and click buttons
+- The log at the bottom of the app shows what Rumble Studio reported; the console window has more detail on lines starting with `[Rumble]`
+
+### "File upload stalled"
+Rumble's upload percentage did not move for 15 minutes, so the app gave up on that video. Check your connection and click **"Upload All"** again to retry it.
+
+### "Rumble won't schedule on ..."
+The schedule date or time is in the past. Pick a later time and click **"Upload All"** again.
+
+### A scheduled time is a few minutes off
+Rumble Studio only offers times in 5-minute steps, so the app rounds to the nearest one.
 
 ### A video shows ERROR with "File not found"
 The file was moved, renamed, or deleted after it was added. Remove it from the queue and add it again from its new location.
@@ -99,27 +129,34 @@ The queue auto-saves to `queue_data.json` next to the app. Your video files are 
 
 ---
 
-## Running from Source
+## What's New in Version 2
 
-```bash
-# Clone the repo
-git clone https://github.com/djkenada/Rumble-Upload.git
-cd Rumble-Upload
+- **Local files only** - The YouTube download path (yt-dlp, cookies, URL box, title cleanup) is gone. You add video files from your computer.
+- **Rumble Studio** - Uploads use Studio's "Upload video" flow instead of the legacy upload page.
+- **Waits for the file** - The app watches Rumble's upload percentage and only continues once the file and Rumble's checks are complete.
+- **Category per video** - Previously every video was filed under News.
+- **Custom thumbnails** - Attach or remove a thumbnail per video.
+- **Retry** - "Upload All" retries videos that failed earlier.
+- **Nothing is deleted** - Videos and thumbnails are never removed from your disk.
+- **Old queues** - A `queue_data.json` from v1 still loads; entries that never had a downloaded file are dropped.
 
-# Install Python 3.12+ and dependencies
-pip install -r requirements.txt
+---
 
-# Run
-python main.py
+## Project Layout
+
+```
+main.py                         # Entry point
+requirements.txt
+app/
+  gui.py                        # Main window, queue handling, upload loop
+  models/video_metadata.py      # One queued video
+  services/rumble_service.py    # Rumble Studio automation (Selenium)
+  services/data_store.py        # Saves/loads queue_data.json
+  utils/config.py               # Studio URL, category list, Chrome profile path
+  widgets/                      # Queue list, editor, schedule panel, progress bar
 ```
 
-### Dependencies
-- Python 3.12+
-- customtkinter
-- tkcalendar
-- Pillow
-- selenium
-- webdriver-manager
+Dependencies: customtkinter, tkcalendar, Pillow, selenium, webdriver-manager.
 
 ---
 
