@@ -28,13 +28,21 @@ A Windows desktop app that batch uploads video files from your computer to Rumbl
 | **OS** | Windows 10 or Windows 11 |
 | **Browser** | Google Chrome (any recent version) |
 | **Account** | A Rumble account |
-| **Python** | Python 3.12 or newer (to run from source) |
+| **Python** | Only to run from source: Python 3.12 or newer |
 
 ---
 
 ## Installation
 
-Version 2 currently runs from source:
+1. Download `RumbleUploader-v2.0.0.zip` from the [latest release](https://github.com/djkenada/Rumble-Upload/releases/latest)
+2. Extract it to any folder (e.g. `C:\RumbleUploader`)
+3. Double-click `RumbleUploader.exe`
+
+No Python is needed. A console window opens alongside the app and shows detailed upload messages. The queue is saved as `queue_data.json` next to the exe.
+
+The **v1.0.0** release is the old YouTube-based version and does not include any of the features described here.
+
+### Running from source
 
 ```bash
 git clone https://github.com/djkenada/Rumble-Upload.git
@@ -43,7 +51,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The `RumbleUploader.zip` attached to the **v1.0.0** release is the old YouTube-based version and does not include any of the features described here.
+### Building the exe
+
+```bash
+pip install pyinstaller
+pyinstaller --noconfirm --clean --onefile --console --name RumbleUploader --collect-all customtkinter --collect-all tkcalendar --collect-all selenium --collect-submodules webdriver_manager --hidden-import babel.numbers main.py
+```
+
+The exe is written to `dist/`.
 
 ---
 
