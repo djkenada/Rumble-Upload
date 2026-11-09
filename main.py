@@ -1,6 +1,6 @@
 import os
 
-# Fix Windows encoding issues with unicode/emoji in YouTube metadata
+# Fix Windows encoding issues with unicode/emoji in titles and descriptions
 os.environ["PYTHONUTF8"] = "1"
 
 from app.gui import App

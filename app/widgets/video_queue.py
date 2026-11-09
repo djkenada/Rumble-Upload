@@ -1,20 +1,21 @@
+import os
+
 import customtkinter as ctk
 from PIL import Image
-from datetime import datetime
 
 from app.models.video_metadata import VideoMetadata
 
 
 STATUS_COLORS = {
-    "pending": "gray",
-    "fetching": "yellow",
-    "ready": "white",
-    "downloading": "orange",
-    "downloaded": "#22d3ee",
-    "uploading": "cyan",
+    "ready": "#22d3ee",
+    "uploading": "orange",
     "done": "green",
     "error": "red",
 }
+
+
+def display_title(metadata: VideoMetadata) -> str:
+    return metadata.title or os.path.basename(metadata.local_file_path)
 
 
 class VideoQueueItem(ctk.CTkFrame):
@@ -36,13 +37,13 @@ class VideoQueueItem(ctk.CTkFrame):
 
         # Title
         self.title_label = ctk.CTkLabel(
-            self, text=metadata.url if not metadata.title else metadata.title,
+            self, text=display_title(metadata),
             font=ctk.CTkFont(size=12, weight="bold"),
             anchor="w", justify="left", wraplength=300
         )
         self.title_label.grid(row=0, column=1, sticky="w", padx=5, pady=(5, 0))
 
-        # Info row: duration + schedule + status
+        # Info row: schedule, or the error message
         self.info_label = ctk.CTkLabel(self, text="", anchor="w", text_color="gray", font=ctk.CTkFont(size=11))
         self.info_label.grid(row=1, column=1, sticky="w", padx=5, pady=(0, 5))
 
@@ -77,11 +78,11 @@ class VideoQueueItem(ctk.CTkFrame):
 
     def update_display(self):
         m = self.metadata
-        self.title_label.configure(text=m.title if m.title else m.url)
+        self.title_label.configure(text=display_title(m))
 
         info_parts = []
-        if m.duration_str and m.duration_str != "00:00":
-            info_parts.append(m.duration_str)
+        if m.status == "error" and m.error_message:
+            info_parts.append(m.error_message[:60])
         if m.scheduled_date:
             info_parts.append(f"Scheduled: {m.scheduled_date.strftime('%m/%d/%Y %I:%M %p')} CT")
         self.info_label.configure(text=" | ".join(info_parts) if info_parts else "")
@@ -99,6 +100,10 @@ class VideoQueueItem(ctk.CTkFrame):
                 self.thumb_label.configure(image=self._thumb_image, text="")
             except Exception:
                 self.thumb_label.configure(text="[img]", image=None)
+        elif self._thumb_image is not None:
+            # Thumbnail was removed
+            self._thumb_image = None
+            self.thumb_label.configure(text="...", image=None)
 
     def set_selected(self, selected: bool):
         if selected:
@@ -115,8 +120,8 @@ class VideoQueue(ctk.CTkScrollableFrame):
         self.grid_columnconfigure(0, weight=1)
         self._on_select = on_select
         self._on_remove = on_remove
-        self._items: dict[str, VideoQueueItem] = {}  # keyed by url
-        self._selected_url: str | None = None
+        self._items: dict[str, VideoQueueItem] = {}  # keyed by local_file_path
+        self._selected_path: str | None = None
 
     def add_video(self, metadata: VideoMetadata):
         item = VideoQueueItem(
@@ -125,28 +130,28 @@ class VideoQueue(ctk.CTkScrollableFrame):
             on_remove=self._handle_remove,
         )
         item.grid(row=len(self._items), column=0, sticky="ew", pady=2)
-        self._items[metadata.url] = item
+        self._items[metadata.local_file_path] = item
 
     def remove_video(self, metadata: VideoMetadata):
-        item = self._items.pop(metadata.url, None)
+        item = self._items.pop(metadata.local_file_path, None)
         if item:
             item.destroy()
-        if self._selected_url == metadata.url:
-            self._selected_url = None
+        if self._selected_path == metadata.local_file_path:
+            self._selected_path = None
         self._relayout()
 
     def update_video(self, metadata: VideoMetadata):
-        item = self._items.get(metadata.url)
+        item = self._items.get(metadata.local_file_path)
         if item:
             item.metadata = metadata
             item.update_display()
 
     def _handle_select(self, metadata: VideoMetadata):
         # Deselect previous
-        if self._selected_url and self._selected_url in self._items:
-            self._items[self._selected_url].set_selected(False)
-        self._selected_url = metadata.url
-        self._items[metadata.url].set_selected(True)
+        if self._selected_path and self._selected_path in self._items:
+            self._items[self._selected_path].set_selected(False)
+        self._selected_path = metadata.local_file_path
+        self._items[metadata.local_file_path].set_selected(True)
         if self._on_select:
             self._on_select(metadata)
 
@@ -155,11 +160,11 @@ class VideoQueue(ctk.CTkScrollableFrame):
             self._on_remove(metadata)
 
     def _relayout(self):
-        for i, (url, item) in enumerate(self._items.items()):
+        for i, item in enumerate(self._items.values()):
             item.grid(row=i, column=0, sticky="ew", pady=2)
 
     def clear(self):
         for item in self._items.values():
             item.destroy()
         self._items.clear()
-        self._selected_url = None
+        self._selected_path = None

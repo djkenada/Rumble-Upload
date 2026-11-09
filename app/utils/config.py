@@ -12,7 +12,6 @@ def _get_project_root():
 
 
 PROJECT_ROOT = _get_project_root()
-DOWNLOAD_DIR = os.path.join(PROJECT_ROOT, "downloads")
 CHROME_DEBUG_PORT = 9222
 CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), "RumbleUploader_ChromeProfile")
 RUMBLE_UPLOAD_URL = "https://rumble.com/upload.php"

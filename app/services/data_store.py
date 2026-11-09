@@ -14,20 +14,14 @@ def save_queue(queue: list[VideoMetadata]):
     data = []
     for m in queue:
         entry = {
-            "url": m.url,
-            "video_id": m.video_id,
+            "local_file_path": m.local_file_path,
             "title": m.title,
             "description": m.description,
-            "duration": m.duration,
-            "duration_str": m.duration_str,
-            "thumbnail_url": m.thumbnail_url,
             "tags": m.tags,
-            "uploader": m.uploader,
-            "upload_date": m.upload_date,
-            "local_file_path": m.local_file_path,
             "thumbnail_local_path": m.thumbnail_local_path,
             "scheduled_date": m.scheduled_date.isoformat() if m.scheduled_date else None,
             "status": m.status,
+            "error_message": m.error_message,
         }
         data.append(entry)
 
@@ -49,21 +43,23 @@ def load_queue() -> list[VideoMetadata]:
         return []
 
     queue = []
+    seen = set()
     for entry in data:
+        path = entry.get("local_file_path")
+        # Entries saved by the old YouTube version that were never downloaded
+        # have no file, so there is nothing to upload.
+        if not path or path in seen:
+            continue
+        seen.add(path)
+
         m = VideoMetadata(
-            url=entry.get("url", ""),
-            video_id=entry.get("video_id", ""),
+            local_file_path=path,
             title=entry.get("title", ""),
             description=entry.get("description", ""),
-            duration=entry.get("duration", 0),
-            duration_str=entry.get("duration_str", "00:00"),
-            thumbnail_url=entry.get("thumbnail_url", ""),
             tags=entry.get("tags", []),
-            uploader=entry.get("uploader", ""),
-            upload_date=entry.get("upload_date", ""),
-            local_file_path=entry.get("local_file_path"),
             thumbnail_local_path=entry.get("thumbnail_local_path"),
             status=entry.get("status", "ready"),
+            error_message=entry.get("error_message", ""),
         )
 
         sched = entry.get("scheduled_date")
@@ -73,17 +69,16 @@ def load_queue() -> list[VideoMetadata]:
             except (ValueError, TypeError):
                 m.scheduled_date = None
 
-        # Fix statuses: if was downloading/uploading/fetching, reset to appropriate state
-        if m.status in ("fetching", "pending"):
-            m.status = "ready" if m.video_id else "pending"
-        elif m.status == "downloading":
-            # Check if file exists (might have finished)
-            if m.local_file_path and os.path.exists(m.local_file_path):
-                m.status = "downloaded"
+        # Anything not finished goes back to waiting (an upload interrupted by
+        # closing the app, or a status from the old version), unless the file is gone.
+        if m.status != "done":
+            if os.path.exists(path):
+                if m.status != "error":
+                    m.status = "ready"
+                    m.error_message = ""
             else:
-                m.status = "ready"
-        elif m.status == "uploading":
-            m.status = "downloaded" if (m.local_file_path and os.path.exists(m.local_file_path)) else "ready"
+                m.status = "error"
+                m.error_message = f"File not found: {path}"
 
         queue.append(m)
 
