@@ -46,6 +46,7 @@ def _find_chrome_exe() -> str:
         os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
         os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        "/usr/bin/google-chrome",
     ]
     for path in candidates:
         if path and os.path.exists(path):
